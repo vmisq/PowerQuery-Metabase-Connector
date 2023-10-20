@@ -27,6 +27,7 @@ Metabase = [
 // Data Source UI publishing description
 Metabase.Publish = [
     Beta = true,
+    Category = "Database",
     ButtonText = {"Metabase", Extension.LoadString("FormulaHelp")},
     SourceImage = Metabase.Icons,
     SourceTypeImage = Metabase.Icons
@@ -106,9 +107,8 @@ Metabase.GetCollections = (metabase_url as text, session_token as text) =>
     in
         content_collection_done;
 
-Metabase.Card = (metabase_url as text, card_id as text) =>
+Metabase.Card = (metabase_url as text, card_id as text, session_token as text) =>
     let
-        session_token = Metabase.Auth(metabase_url),
         headers = [
             #"Content-Type" = "application/json",
             #"X-Metabase-Session" = session_token
@@ -143,10 +143,10 @@ Metabase.GetCards = (metabase_url as text, session_token as text) =>
         ),
         content = Json.Document(Text.FromBinary(response)),
         content_card = Table.FromList(content, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
-        content_card_id = Table.ExpandRecordColumn(content_card, "Column1", {"name", "id", "collection_id"}, {"Name", "id", "collection_id"}),
-        content_card_id_text = Table.TransformColumnTypes(content_card_id,{{"id", type text}, {"collection_id", type text}}),
+        content_card_id = Table.ExpandRecordColumn(content_card, "Column1", {"name", "id", "collection_id", "database_id"}, {"Name", "id", "collection_id", "db_id"}),
+        content_card_id_text = Table.TransformColumnTypes(content_card_id,{{"id", type text}, {"collection_id", type text}, {"db_id", type text}}),
         content_card_id_replaced = Table.ReplaceValue(content_card_id_text,null,"root",Replacer.ReplaceValue,{"collection_id"}),
-        content_card_data = Table.AddColumn(content_card_id_replaced, "Data", each Metabase.Card(metabase_url, _[id])),
+        content_card_data = Table.AddColumn(content_card_id_replaced, "Data", each Metabase.View(metabase_url, _[db_id], "card__" & _[id], session_token)),
         content_card_item_kind = Table.AddColumn(content_card_data, "ItemKind", each "View"),
         content_card_item_name = Table.AddColumn(content_card_item_kind, "ItemName", each "Table"),
         content_card_is_leaf = Table.AddColumn(content_card_item_name, "IsLeaf", each true),
@@ -177,14 +177,15 @@ Metabase.CardNav = (content_card_done as table) =>
     in
         card_final;
 
-Metabase.Table = (metabase_url as text, database_id as text, table_id as text) =>
+Metabase.GetData = (metabase_url as text, database_id as text, table_id as text, session_token as text, optional state as record) =>
     let
-        session_token = Metabase.Auth(metabase_url),
         headers = [
             #"Content-Type" = "application/x-www-form-urlencoded",
             #"X-Metabase-Session" = session_token
         ],
-        query = "{""database"": " & database_id &", ""type"": ""query"", ""query"": {""source-table"": " & table_id & "}}",
+        query_folding = if state[Top]? = null then "" else ", ""limit"": " & Number.ToText(state[Top]),
+        table_or_card_id = if Text.StartsWith(table_id, "card__") then """" & table_id & """" else table_id,
+        query = "{""database"": " & database_id &", ""type"": ""query"", ""query"": {""source-table"": " & table_or_card_id  & query_folding & "}}",
         request_body = Text.ToBinary("query=" & query),
         response = Web.Contents(
             metabase_url,
@@ -199,6 +200,29 @@ Metabase.Table = (metabase_url as text, database_id as text, table_id as text) =
         data_table = Table.PromoteHeaders(content, [PromoteAllScalars=true])
     in
         data_table;
+
+Metabase.TableRows = (metabase_url as text, database_id as text, table_id as text, session_token as text) =>
+    let
+        headers = [
+            #"Content-Type" = "application/x-www-form-urlencoded",
+            #"X-Metabase-Session" = session_token
+        ],
+        query = "{""database"": " & database_id &", ""type"": ""query"", ""query"": {""source-table"": " & table_id & ", ""aggregation"":[[""count"",null]]}}}",
+        request_body = Text.ToBinary("query=" & query),
+        response = Web.Contents(
+            metabase_url,
+            [
+                Headers = headers,
+                RelativePath = "/api/dataset/csv",
+                Content = request_body,
+                ManualStatusHandling = {400, 401, 403, 404, 500} // Handle error responses as needed
+            ]
+        ),
+        content = Csv.Document(Text.FromBinary(response)),
+        data_table = Table.PromoteHeaders(content, [PromoteAllScalars=true]),
+        nrows = data_table[Count]{0}
+    in
+        nrows;
 
 Metabase.GetTables = (metabase_url as text, session_token as text) =>
     let
@@ -219,7 +243,7 @@ Metabase.GetTables = (metabase_url as text, session_token as text) =>
         content_table_id = Table.ExpandRecordColumn(content_table, "Column1", {"display_name", "id", "db_id", "schema", "db"}, {"Name", "id", "db_id", "schema_name", "db"}),
         content_table_id_db_name = Table.ExpandRecordColumn(content_table_id, "db", {"name"}, {"db_name"}),
         content_table_id_text = Table.TransformColumnTypes(content_table_id_db_name,{{"id", type text}, {"db_id", type text}}),
-        content_table_data = Table.AddColumn(content_table_id_text, "Data", each Metabase.Table(metabase_url, _[db_id], _[id])),
+        content_table_data = Table.AddColumn(content_table_id_text, "Data", each Metabase.View(metabase_url, _[db_id], _[id], session_token)),
         content_table_item_kind = Table.AddColumn(content_table_data, "ItemKind", each "Table"),
         content_table_item_name = Table.AddColumn(content_table_item_kind, "ItemName", each "Table"),
         content_table_is_leaf = Table.AddColumn(content_table_item_name, "IsLeaf", each true),
@@ -251,6 +275,38 @@ Metabase.TableNav = (content_table_done as table) =>
     in
         db_final;
 
+Metabase.View = (metabase_url as text, database_id as text, table_id as text, session_token as text) as table =>
+    let
+        View = (state as record) =>
+            Table.View(
+                null,
+                [
+                    GetType = () => Value.Type(GetRows()), // Replace for api metadata and cache it
+                    GetRows = () => Metabase.GetData(metabase_url, database_id, table_id, session_token, state),
+                    GetRowCount = () as number => Metabase.TableRows(metabase_url, database_id, table_id, session_token),
+
+                    // Table.FirstN
+                    OnTake = (count as number) => let newState = state & [Top = count] in @View(newState) // ,
+
+                    // // Table.Skip
+                    // OnSkip = (count as number) => let newState = state & [Skip = count] in @View(newState),
+                    
+                    // // Table.SelectColumns
+                    // OnSelectColumns = (cols as list) => let newState = state & [Columns = cols] in @View(newState),
+                    
+                    // // Table.Sort
+                    // OnSort = (order as list) => => let newState = state & [Order = order] in @View(newState),
+                    
+                    // // Cache Schema when using api schema
+                    // CalculateSchema = (state) as type =>
+                    //     if (state[Schema]? = null) then
+                    //         Value.Type(GetRows())
+                    //     else
+                    //         state[Schema]
+                ]
+            )
+    in
+        View([]);
 
 // Microsoft Navigation Table Function
 Table.ToNavigationTable = (

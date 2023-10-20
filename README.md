@@ -12,7 +12,7 @@ On Power BI: Options -> Security -> Data Extensions -> Allow any extension to lo
 
 _*By doing this you will trust this connector, that's why it's open-source and you can verify and modify what it does._
 
-## Future Improvements
+## Limitations
 
 ### Authentication
 
@@ -22,7 +22,6 @@ Authentication is currently done in two ways:
 
 _*Session Token is recommended because as of now, this connector doesn't logout of the session and would generate a new session token every time._
 
-### Data Retrieval
+### Query Folding
 
-Currently every dataset is queried in its completion including for Preview, which might not be viable for large datasets.
-It also does not support parameterized questions.
+Currently only row limit is applied. It was the main one, since it allows faster Preview.
